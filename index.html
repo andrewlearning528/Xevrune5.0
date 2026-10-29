@@ -1,0 +1,609 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#10121b">
+<title>Xevrune AI</title>
+<style>
+:root{color-scheme:dark;--bg:#10121b;--panel:#191c29;--line:#303449;--accent:#8b7cff;--text:#f4f4ff;--muted:#a7abc1}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px system-ui,Arial,sans-serif}
+header{padding:18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h1{margin:0;color:var(--accent)}
+main{width:min(850px,100%);margin:auto;padding:18px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:16px}
+input,textarea,button{font:inherit}
+input,textarea{width:100%;padding:12px;margin:6px 0 12px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:9px}
+textarea{min-height:76px;resize:vertical}
+button{cursor:pointer;padding:10px 14px;border:1px solid var(--line);border-radius:9px;background:#252940;color:var(--text)}
+button:hover{border-color:var(--accent)}
+button:disabled{opacity:.55;cursor:wait}
+.primary{background:var(--accent);border-color:var(--accent);color:white}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.row input{flex:1;min-width:180px}
+.muted{font-size:13px;color:var(--muted)}
+.status{min-height:22px;color:#c4baff}
+#chat{height:340px;overflow:auto;background:var(--bg);border-radius:10px;padding:10px;margin:14px 0}
+.message{padding:12px;margin:8px 0;border-radius:10px;white-space:pre-wrap;overflow-wrap:anywhere}
+.user{background:#292b46}.assistant{background:#202536}.system{background:#392d25;color:#ffdbad}
+.hidden{display:none}
+footer{text-align:center;padding:20px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Xevrune</h1>
+  <div class="row">
+    <span id="accountStatus" class="muted">Guest mode</span>
+    <button id="logoutBtn" class="hidden">Sign out</button>
+  </div>
+</header>
+
+<main>
+<section class="panel">
+  <h2>Your AI assistant</h2>
+  <p class="muted">A personal AI experiment with chat, memory, and calculations.</p>
+  <div id="authPanel">
+    <label for="email">Email</label>
+    <input id="email" type="email" autocomplete="email" placeholder="you@example.com">
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password" placeholder="Password">
+    <div class="row">
+      <button id="loginBtn">Sign in</button>
+      <button id="signupBtn" class="primary">Create account</button>
+    </div>
+    <p class="muted">You can also chat as a guest. Guest data stays in this browser.</p>
+  </div>
+</section>
+
+<section class="panel">
+  <h3>Intelligence</h3>
+  <p id="modelStatus" class="status">Starting Xevrune...</p>
+  <button id="activateBtn" class="primary">Load / Retry AI</button>
+  <p class="muted">The first download may take several minutes. Cached model files may speed up later visits.</p>
+</section>
+
+<section class="panel">
+  <h3>Chat</h3>
+  <div id="chat" aria-live="polite"></div>
+  <form id="chatForm">
+    <label for="messageInput">Your message</label>
+    <textarea id="messageInput" placeholder="Ask Xevrune something..." required></textarea>
+    <div class="row">
+      <button class="primary" id="sendBtn" type="submit">Send</button>
+      <button id="clearBtn" type="button">Clear chat</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <h3>Personal memory</h3>
+  <p class="muted">Save notes for Xevrune to use in later chats.</p>
+  <textarea id="memoryInput" placeholder="Example: I am learning JavaScript."></textarea>
+  <div class="row">
+    <button id="saveMemoryBtn" class="primary">Save memory</button>
+    <button id="showMemoryBtn">Refresh</button>
+    <button id="deleteMemoryBtn">Delete all</button>
+  </div>
+  <p id="memoryStatus" class="status"></p>
+  <div id="memoryList"></div>
+</section>
+
+<section class="panel">
+  <h3>Calculator</h3>
+  <input id="calcInput" placeholder="(25 + 5) * 3">
+  <button id="calcBtn">Calculate</button>
+  <p id="calcResult" class="status"></p>
+</section>
+</main>
+
+<footer>Xevrune AI · Experimental project · No music</footer>
+
+<script type="module">
+import { createClient } from
+  "https://esm.sh/@supabase/supabase-js@2";
+
+const SUPABASE_URL =
+  "https://dgunuyhxbvsftxydzyps.supabase.co";
+
+// Browser publishable key only. Never put a service-role key here.
+const SUPABASE_KEY =
+  "sb_publishable_fNahng6bY9wL_xKsZiT-Rg_p-p7UA9p";
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const $ = id => document.getElementById(id);
+
+let currentUser = null;
+let aiPipeline = null;
+let modelLoading = false;
+let sending = false;
+let messages = [];
+let memories = [];
+let cloudMemoryAvailable = false;
+
+function status(id, text) {
+  $(id).textContent = text;
+}
+
+function showMessage(role, content) {
+  const div = document.createElement("div");
+  div.className = "message " + role;
+  div.textContent = content;
+  $("chat").appendChild(div);
+  $("chat").scrollTop = $("chat").scrollHeight;
+}
+
+function chatKey() {
+  return currentUser
+    ? "xevrune_chat_" + currentUser.id
+    : "xevrune_chat_guest";
+}
+
+function memoryKey() {
+  return currentUser
+    ? "xevrune_memory_" + currentUser.id
+    : "xevrune_memory_guest";
+}
+
+function saveChat() {
+  try {
+    localStorage.setItem(chatKey(), JSON.stringify(messages.slice(-80)));
+  } catch (error) {
+    console.warn("Local chat could not be saved:", error);
+  }
+}
+
+function loadChat() {
+  try {
+    const data = JSON.parse(localStorage.getItem(chatKey()) || "[]");
+    messages = Array.isArray(data) ? data : [];
+  } catch {
+    messages = [];
+  }
+
+  $("chat").replaceChildren();
+
+  if (!messages.length) {
+    showMessage("assistant",
+      "Hello! I'm Xevrune. My AI model loads automatically when this page opens.");
+  } else {
+    messages.forEach(m => showMessage(m.role, m.content));
+  }
+}
+
+function renderAccount() {
+  $("accountStatus").textContent = currentUser
+    ? "Signed in: " + currentUser.email
+    : "Guest mode";
+
+  $("authPanel").classList.toggle("hidden", !!currentUser);
+  $("logoutBtn").classList.toggle("hidden", !currentUser);
+}
+
+async function refreshUser() {
+  const { data, error } = await supabase.auth.getUser();
+  if (error) console.warn("Account check:", error.message);
+
+  currentUser = data?.user || null;
+  renderAccount();
+  loadChat();
+  await loadMemories();
+}
+
+async function signUp() {
+  const email = $("email").value.trim();
+  const password = $("password").value;
+
+  if (!email || password.length < 6) {
+    alert("Enter an email and a password of at least 6 characters.");
+    return;
+  }
+
+  const { data, error } = await supabase.auth.signUp({ email, password });
+
+  if (error) {
+    alert("Sign-up failed: " + error.message);
+    return;
+  }
+
+  if (data.session) {
+    await refreshUser();
+    alert("Account created!");
+  } else {
+    alert("Check your email for a confirmation link, then sign in.");
+  }
+}
+
+async function signIn() {
+  const { error } = await supabase.auth.signInWithPassword({
+    email: $("email").value.trim(),
+    password: $("password").value
+  });
+
+  if (error) {
+    alert("Sign-in failed: " + error.message);
+    return;
+  }
+
+  await refreshUser();
+}
+
+async function signOut() {
+  const { error } = await supabase.auth.signOut();
+
+  if (error) {
+    alert("Sign-out failed: " + error.message);
+    return;
+  }
+
+  currentUser = null;
+  memories = [];
+  renderAccount();
+  loadChat();
+  await loadMemories();
+}
+
+async function activateAI() {
+  if (aiPipeline || modelLoading) return;
+
+  modelLoading = true;
+  $("activateBtn").disabled = true;
+  status("modelStatus", "Preparing AI library...");
+
+  try {
+    const { pipeline, env } = await import(
+      "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2"
+    );
+
+    // Reuse cached model files where supported by the browser.
+    env.useBrowserCache = true;
+
+    status("modelStatus", "Loading model. First download may take a while...");
+
+    aiPipeline = await pipeline(
+      "text-generation",
+      "onnx-community/Qwen2.5-0.5B-Instruct",
+      { dtype: "q4" }
+    );
+
+    status("modelStatus", "Intelligence ready!");
+    $("activateBtn").textContent = "Intelligence Active";
+  } catch (error) {
+    console.error("AI loading failed:", error);
+    status("modelStatus", "AI could not load. See Console for details.");
+    showMessage("system",
+      "AI loading failed: " + (error.message || String(error)) +
+      ". Basic fallback replies are available.");
+  } finally {
+    modelLoading = false;
+    $("activateBtn").disabled = false;
+  }
+}
+
+function basicReply(text) {
+  const s = text.toLowerCase().trim();
+
+  if (/^(hi|hello|hey)\b/.test(s))
+    return "Hello! What would you like to talk about?";
+  if (s.includes("your name"))
+    return "I'm Xevrune, an experimental AI assistant.";
+  if (s.includes("how are you"))
+    return "I'm running and ready to help.";
+  if (s.includes("remember"))
+    return "You can save a note in the Personal memory section.";
+  if (s.includes("what can you do"))
+    return "I can generate AI responses when the model is loaded, use saved notes, and calculate arithmetic.";
+
+  return "I received your message, but my language model is not ready yet. " +
+    "I'll respond more fully when intelligence finishes loading.";
+}
+
+async function generateReply(text) {
+  if (!aiPipeline) return basicReply(text);
+
+  const notes = memories.map(m => m.content).join("\n").slice(0, 2500);
+  const history = messages.slice(-8).map(m => ({
+    role: m.role,
+    content: m.content
+  }));
+
+  const prompt = [
+    {
+      role: "system",
+      content: "You are Xevrune, a helpful AI assistant. " +
+        "Use these user-provided memory notes when relevant:\n" +
+        (notes || "(No saved notes)") +
+        "\nDo not claim to remember information that is not supplied."
+    },
+    ...history,
+    { role: "user", content: text }
+  ];
+
+  const result = await aiPipeline(prompt, {
+    max_new_tokens: 180,
+    do_sample: false
+  });
+
+  const output = result?.[0]?.generated_text;
+
+  if (Array.isArray(output)) {
+    return output[output.length - 1]?.content ||
+      "I couldn't produce a response.";
+  }
+
+  if (typeof output === "string") return output;
+  return "I couldn't produce a response.";
+}
+
+async function sendMessage(event) {
+  event.preventDefault();
+
+  if (sending) return;
+
+  const text = $("messageInput").value.trim();
+  if (!text) return;
+
+  $("messageInput").value = "";
+  messages.push({ role: "user", content: text });
+  showMessage("user", text);
+  saveChat();
+
+  sending = true;
+  $("sendBtn").disabled = true;
+  status("modelStatus", aiPipeline ? "Thinking..." : "Using basic reply mode...");
+
+  try {
+    const reply = await generateReply(text);
+    messages.push({ role: "assistant", content: reply });
+    showMessage("assistant", reply);
+    saveChat();
+  } catch (error) {
+    console.error("Reply failed:", error);
+    showMessage("system",
+      "Reply error: " + (error.message || String(error)));
+  } finally {
+    sending = false;
+    $("sendBtn").disabled = false;
+    status("modelStatus", aiPipeline
+      ? "Intelligence ready!"
+      : "AI model is not loaded.");
+  }
+}
+
+function saveMemoriesLocally() {
+  try {
+    localStorage.setItem(memoryKey(), JSON.stringify(memories));
+  } catch (error) {
+    console.warn("Local memory save failed:", error);
+  }
+}
+
+function renderMemories() {
+  $("memoryList").replaceChildren();
+
+  if (!memories.length) {
+    const p = document.createElement("p");
+    p.className = "muted";
+    p.textContent = "No saved memories yet.";
+    $("memoryList").appendChild(p);
+    return;
+  }
+
+  memories.forEach(m => {
+    const p = document.createElement("p");
+    p.className = "message assistant";
+    p.textContent = m.content;
+    $("memoryList").appendChild(p);
+  });
+}
+
+async function loadMemories() {
+  try {
+    const local = JSON.parse(localStorage.getItem(memoryKey()) || "[]");
+    memories = Array.isArray(local) ? local : [];
+  } catch {
+    memories = [];
+  }
+
+  cloudMemoryAvailable = false;
+
+  if (currentUser) {
+    const { data, error } = await supabase
+      .from("memories")
+      .select("id, content, created_at")
+      .eq("user_id", currentUser.id)
+      .order("created_at", { ascending: true });
+
+    if (!error && Array.isArray(data)) {
+      memories = data;
+      cloudMemoryAvailable = true;
+      saveMemoriesLocally();
+    } else if (error) {
+      console.warn("Cloud memory unavailable:", error.message);
+    }
+  }
+
+  renderMemories();
+}
+
+async function saveMemory() {
+  const content = $("memoryInput").value.trim();
+
+  if (!content) {
+    status("memoryStatus", "Write a note first.");
+    return;
+  }
+
+  if (currentUser) {
+    const { data, error } = await supabase
+      .from("memories")
+      .insert({ user_id: currentUser.id, content })
+      .select("id, content, created_at")
+      .single();
+
+    if (!error && data) {
+      memories.push(data);
+      cloudMemoryAvailable = true;
+      saveMemoriesLocally();
+      renderMemories();
+      $("memoryInput").value = "";
+      status("memoryStatus", "Memory saved to your account.");
+      return;
+    }
+
+    console.error("Cloud memory save failed:", error);
+    status("memoryStatus", "Cloud save failed; saving locally instead.");
+  }
+
+  memories.push({
+    id: crypto.randomUUID(),
+    content,
+    created_at: new Date().toISOString()
+  });
+
+  saveMemoriesLocally();
+  renderMemories();
+  $("memoryInput").value = "";
+  status("memoryStatus", "Saved in this browser only.");
+}
+
+async function deleteMemories() {
+  if (!confirm("Delete all memories for this account or guest?")) return;
+
+  if (currentUser && cloudMemoryAvailable) {
+    const { error } = await supabase
+      .from("memories")
+      .delete()
+      .eq("user_id", currentUser.id);
+
+    if (error) {
+      console.error("Cloud deletion failed:", error);
+      status("memoryStatus", "Cloud deletion failed. Check Console and RLS policies.");
+      return;
+    }
+  }
+
+  memories = [];
+  saveMemoriesLocally();
+  renderMemories();
+  status("memoryStatus", "Memories deleted.");
+}
+
+// Arithmetic parser; avoids eval() and Function().
+function calculate(expression) {
+  const clean = expression.replace(/\s/g, "");
+  const tokens = clean.match(/\d*\.?\d+(?:e[+-]?\d+)?|[()+*/%\-^]/gi);
+
+  if (!tokens || tokens.join("") !== clean) {
+    throw new Error("Use numbers, + - * / % ^ and parentheses only.");
+  }
+
+  let i = 0;
+
+  function primary() {
+    const token = tokens[i++];
+
+    if (token === "+") return primary();
+    if (token === "-") return -primary();
+
+    if (token === "(") {
+      const value = addSub();
+      if (tokens[i++] !== ")") throw new Error("Missing closing parenthesis.");
+      return value;
+    }
+
+    const n = Number(token);
+    if (!Number.isFinite(n)) throw new Error("Invalid number.");
+    return n;
+  }
+
+  function power() {
+    const value = primary();
+    if (tokens[i] === "^") {
+      i++;
+      return Math.pow(value, power());
+    }
+    return value;
+  }
+
+  function multiplyDivide() {
+    let value = power();
+
+    while (["*", "/", "%"].includes(tokens[i])) {
+      const op = tokens[i++];
+      const right = power();
+
+      if (right === 0 && (op === "/" || op === "%"))
+        throw new Error("Cannot divide by zero.");
+
+      if (op === "*") value *= right;
+      if (op === "/") value /= right;
+      if (op === "%") value %= right;
+    }
+
+    return value;
+  }
+
+  function addSub() {
+    let value = multiplyDivide();
+
+    while (tokens[i] === "+" || tokens[i] === "-") {
+      const op = tokens[i++];
+      const right = multiplyDivide();
+      value = op === "+" ? value + right : value - right;
+    }
+
+    return value;
+  }
+
+  const result = addSub();
+
+  if (i !== tokens.length || !Number.isFinite(result))
+    throw new Error("Invalid expression.");
+
+  return result;
+}
+
+$("signupBtn").addEventListener("click", signUp);
+$("loginBtn").addEventListener("click", signIn);
+$("logoutBtn").addEventListener("click", signOut);
+$("activateBtn").addEventListener("click", activateAI);
+$("chatForm").addEventListener("submit", sendMessage);
+$("saveMemoryBtn").addEventListener("click", saveMemory);
+$("showMemoryBtn").addEventListener("click", async () => {
+  await loadMemories();
+  status("memoryStatus", "Memory refreshed.");
+});
+$("deleteMemoryBtn").addEventListener("click", deleteMemories);
+
+$("clearBtn").addEventListener("click", () => {
+  if (!confirm("Clear this conversation?")) return;
+  messages = [];
+  saveChat();
+  $("chat").replaceChildren();
+  showMessage("assistant", "Conversation cleared. What next?");
+});
+
+$("calcBtn").addEventListener("click", () => {
+  try {
+    status("calcResult", "Result: " + calculate($("calcInput").value));
+  } catch (error) {
+    status("calcResult", error.message);
+  }
+});
+
+supabase.auth.onAuthStateChange(() => {
+  setTimeout(() => {
+    refreshUser().catch(error => console.error("Account refresh failed:", error));
+  }, 0);
+});
+
+// Start automatically; the button remains available to retry.
+loadChat();
+refreshUser().catch(error => console.error("Startup error:", error));
+activateAI();
+</script>
+</body>
+</html>
